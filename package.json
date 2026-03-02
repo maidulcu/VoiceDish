@@ -5,7 +5,10 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "deploy": "bash deploy.sh",
+    "deploy:docker": "bash deploy-docker.sh",
+    "deploy:zip": "bash deploy-zip.sh"
   },
   "keywords": [],
   "author": "",

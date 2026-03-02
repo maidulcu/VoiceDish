@@ -6,3 +6,4 @@ orders.db
 dist/
 coverage/
 tsc-out/
+deploy-config.sh
