@@ -2,16 +2,25 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
+	"golang.org/x/time/rate"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -32,6 +41,61 @@ type Order struct {
 	Total       string         `json:"total"`
 }
 
+type Session struct {
+	ID        uint      `gorm:"primarykey"`
+	Token     string    `gorm:"uniqueIndex;size:64"`
+	ExpiresAt time.Time `gorm:"index"`
+	CreatedAt time.Time
+}
+
+const maxSessions = 1000
+
+func generateToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+func validateSession(token string) bool {
+	var session Session
+	err := db.Where("token = ? AND expires_at > ?", token, time.Now()).First(&session).Error
+	return err == nil
+}
+
+func createSession() string {
+	token := generateToken()
+
+	var count int64
+	db.Model(&Session{}).Count(&count)
+	if count >= maxSessions {
+		var oldest Session
+		db.Order("created_at ASC").First(&oldest)
+		db.Delete(&oldest)
+	}
+
+	session := Session{
+		Token:     token,
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+	db.Create(&session)
+	return token
+}
+
+func cleanupSessions() {
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			db.Where("expires_at < ?", time.Now()).Delete(&Session{})
+		}
+	}()
+}
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+func getHTTPClient() *http.Client {
+	return httpClient
+}
+
 func initDB() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -46,42 +110,81 @@ func initDB() {
 		}
 	}
 
-	db.AutoMigrate(&Order{})
+	db.AutoMigrate(&Order{}, &Session{})
 	log.Println("Database connected and migrated")
 }
 
-func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using system environment variables")
+var validStatuses = map[string]bool{
+	"pending":  true,
+	"accepted": true,
+	"ready":    true,
+	"rejected": true,
+}
+
+func getVerifyToken() string {
+	token := os.Getenv("VERIFY_TOKEN")
+	if token == "" {
+		log.Fatal("FATAL: VERIFY_TOKEN environment variable is required")
+	}
+	return token
+}
+
+func getAppSecret() string {
+	return os.Getenv("WHATSAPP_APP_SECRET")
+}
+
+func getAPIKey() string {
+	key := os.Getenv("API_KEY")
+	if key == "" {
+		log.Fatal("FATAL: API_KEY environment variable is required for dashboard access")
+	}
+	return key
+}
+
+type ipLimiter struct {
+	limiters map[string]*rate.Limiter
+	mu       sync.RWMutex
+}
+
+func newIPLimiter() *ipLimiter {
+	return &ipLimiter{limiters: make(map[string]*rate.Limiter)}
+}
+
+func (i *ipLimiter) getLimiter(ip string) *rate.Limiter {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	limiter, exists := i.limiters[ip]
+	if !exists {
+		limiter = rate.NewLimiter(rate.Limit(10), 20)
+		i.limiters[ip] = limiter
 	}
 
-	initDB()
+	return limiter
+}
 
-	r := gin.Default()
+func rateLimitMiddleware() gin.HandlerFunc {
+	limiter := newIPLimiter()
 
-	r.GET("/health", healthCheck)
-	r.GET("/webhook", webhookVerification)
-	r.POST("/webhook", webhookHandler)
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
 
-	r.GET("/api/orders", getOrders)
-	r.PUT("/api/orders/:id", updateOrderStatus)
-	r.GET("/api/orders/stream", orderStream)
+		if !limiter.getLimiter(ip).Allow() {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests"})
+			return
+		}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Printf("Server starting on port %s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		c.Next()
 	}
 }
 
-func healthCheck(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status": "VoiceDish backend is running!",
-	})
+func verifyWhatsAppSignature(body []byte, signature string, appSecret string) bool {
+	if signature == "" || appSecret == "" {
+		return false
+	}
+
+	expectedSig := "sha256=" + hex.EncodeToString(hmac.New(sha256.New, []byte(appSecret)).Sum(body))
+	return subtle.ConstantTimeCompare([]byte(signature), []byte(expectedSig)) == 1
 }
 
 func webhookVerification(c *gin.Context) {
@@ -89,33 +192,43 @@ func webhookVerification(c *gin.Context) {
 	token := c.Query("hub.verify_token")
 	challenge := c.Query("hub.challenge")
 
-	verifyToken := os.Getenv("VERIFY_TOKEN")
-	if verifyToken == "" {
-		verifyToken = "my_secure_token_123"
-	}
+	expectedToken := getVerifyToken()
 
-	if mode == "subscribe" && token == verifyToken {
+	if mode == "subscribe" && subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1 {
 		log.Println("Webhook verified successfully")
 		c.String(http.StatusOK, challenge)
 		return
 	}
 
-	log.Printf("Webhook verification failed: mode=%s, token=%s", mode, token)
+	log.Printf("Webhook verification failed: mode=%s", mode)
 	c.String(http.StatusForbidden, "Forbidden")
 }
 
 func webhookHandler(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
+	signature := c.GetHeader("X-Hub-Signature-256")
+	appSecret := getAppSecret()
+
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20))
 	if err != nil {
 		log.Printf("Error reading request body: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
-	fmt.Printf("Webhook payload: %s\n", string(body))
+	if appSecret != "" && !verifyWhatsAppSignature(body, signature, appSecret) {
+		if signature == "" {
+			log.Printf("Webhook missing signature header")
+		} else {
+			log.Printf("Webhook signature verification failed")
+		}
+		c.String(http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	log.Printf("Webhook received: %d bytes", len(body))
 
 	var payload map[string]interface{}
-	if err := c.ShouldBindJSON(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		log.Printf("Error parsing JSON: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
 		return
@@ -175,9 +288,9 @@ func processMessage(value map[string]interface{}) {
 
 		switch msgType {
 		case "audio":
-			handleAudioMessage(msgMap, from)
+			go handleAudioMessage(msgMap, from)
 		case "text":
-			handleTextMessage(msgMap, from)
+			go handleTextMessage(msgMap, from)
 		default:
 			log.Printf("Unhandled message type: %s", msgType)
 		}
@@ -280,7 +393,7 @@ func transcribeAudio(fileID string) (string, error) {
 	writer.CreateFormFile("file", "audio.ogg", audioData)
 	writer.Close()
 
-	client := &http.Client{}
+	client := getHTTPClient()
 	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -315,7 +428,7 @@ func downloadWhatsAppMedia(fileID string) ([]byte, error) {
 
 	url := fmt.Sprintf("https://graph.facebook.com/v21.0/%s", fileID)
 
-	client := &http.Client{}
+	client := getHTTPClient()
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -417,7 +530,7 @@ If you cannot extract a valid order, return: {"items": [], "total": "0", "error"
 		"temperature": 0.3,
 	}
 
-	client := &http.Client{}
+	client := getHTTPClient()
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to marshal payload: %w", err)
@@ -504,7 +617,7 @@ func sendWhatsAppMessage(to string, body string) {
 		},
 	}
 
-	client := &http.Client{}
+	client := getHTTPClient()
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling payload: %v", err)
@@ -540,7 +653,13 @@ func getOrders(c *gin.Context) {
 }
 
 func updateOrderStatus(c *gin.Context) {
-	id := c.Param("id")
+	idParam := c.Param("id")
+	id, err := strconv.ParseUint(idParam, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid order ID"})
+		return
+	}
+
 	var order Order
 	if err := db.First(&order, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
@@ -555,12 +674,18 @@ func updateOrderStatus(c *gin.Context) {
 		return
 	}
 
+	if !validStatuses[updateData.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status. Must be: pending, accepted, ready, or rejected"})
+		return
+	}
+
 	order.Status = updateData.Status
 	if err := db.Save(&order).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	notifyOrderChange()
 	c.JSON(http.StatusOK, order)
 }
 
@@ -580,22 +705,56 @@ func saveOrder(customerID, phoneNumber, transcript, orderJSON, total string) *Or
 	}
 
 	log.Printf("Order saved: ID=%d", order.ID)
+	notifyOrderChange()
 	return &order
 }
 
+func notifyOrderChange() {
+	go func() {
+		db.Exec("NOTIFY orders_changed, 'updated'")
+	}()
+}
+
 func orderStream(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization required"})
+		return
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization header"})
+		return
+	}
+
+	token := parts[1]
+	if parts[0] != "Bearer" || !validateSession(token) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired session"})
+		return
+	}
+
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Origin", "same-origin")
 
 	notify := c.Request.Context().Done()
 
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	c.JSON(http.StatusOK, gin.H{"message": "Connected to order stream"})
+	c.Writer.Flush()
 
 	var lastID uint
-	c.JSON(http.StatusOK, gin.H{"message": "Connected to order stream"})
+	db.Model(&Order{}).Order("id DESC").Pluck("COALESCE(MAX(id), 0)", &lastID)
+
+	isProduction := os.Getenv("DATABASE_URL") != ""
+	pollInterval := 5 * time.Second
+	if !isProduction {
+		pollInterval = 2 * time.Second
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -612,5 +771,101 @@ func orderStream(c *gin.Context) {
 				}
 			}
 		}
+	}
+}
+
+func healthCheck(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status": "VoiceDish backend is running!",
+	})
+}
+
+func authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+
+		if authHeader == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization required"})
+			return
+		}
+
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization header"})
+			return
+		}
+
+		token := parts[1]
+
+		if parts[0] == "Bearer" && validateSession(token) {
+			c.Next()
+			return
+		}
+
+		if parts[0] == "ApiKey" {
+			expectedKey := getAPIKey()
+			if subtle.ConstantTimeCompare([]byte(token), []byte(expectedKey)) == 1 {
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+	}
+}
+
+func loginHandler(c *gin.Context) {
+	var req struct {
+		APIKey string `json:"apiKey"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	expectedKey := getAPIKey()
+	if subtle.ConstantTimeCompare([]byte(req.APIKey), []byte(expectedKey)) != 1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+		return
+	}
+
+	token := createSession()
+	c.JSON(http.StatusOK, gin.H{"token": token})
+}
+
+func main() {
+	getVerifyToken()
+	getAPIKey()
+
+	initDB()
+	cleanupSessions()
+
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(gin.Logger())
+	r.Use(rateLimitMiddleware())
+
+	r.GET("/health", healthCheck)
+	r.GET("/webhook", webhookVerification)
+	r.POST("/webhook", webhookHandler)
+
+	r.POST("/api/auth/login", loginHandler)
+
+	api := r.Group("/api")
+	api.Use(authMiddleware())
+	{
+		api.GET("/orders", getOrders)
+		api.PUT("/orders/:id", updateOrderStatus)
+		api.GET("/orders/stream", orderStream)
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Server starting on port %s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
 }

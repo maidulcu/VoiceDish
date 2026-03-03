@@ -13,13 +13,28 @@ interface Order {
   total: string;
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+
 export default function Dashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sessionToken, setSessionToken] = useState('');
+  const [showLogin, setShowLogin] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
+    const savedToken = sessionStorage.getItem('voicedish_session');
+    if (savedToken) {
+      setSessionToken(savedToken);
+      setShowLogin(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+    
     fetchOrders();
-    const eventSource = new EventSource('http://localhost:8080/api/orders/stream');
+    const eventSource = new EventSource(`${API_BASE}/api/orders/stream`);
     
     eventSource.onmessage = (event) => {
       console.log('SSE event:', event.data);
@@ -34,11 +49,48 @@ export default function Dashboard() {
     return () => {
       eventSource.close();
     };
-  }, []);
+  }, [sessionToken]);
+
+  const login = async (apiKey: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey }),
+      });
+      
+      if (!res.ok) {
+        setError('Invalid API key');
+        return;
+      }
+      
+      const data = await res.json();
+      const token = data.token;
+      sessionStorage.setItem('voicedish_session', token);
+      setSessionToken(token);
+      setShowLogin(false);
+      setError('');
+    } catch (err) {
+      setError('Connection failed. Is the backend running?');
+    }
+  };
+
+  const logout = () => {
+    sessionStorage.removeItem('voicedish_session');
+    setSessionToken('');
+    setShowLogin(true);
+  };
 
   const fetchOrders = async () => {
     try {
-      const res = await fetch('http://localhost:8080/api/orders');
+      const res = await fetch(`${API_BASE}/api/orders`, {
+        headers: { 'Authorization': `Bearer ${sessionToken}` }
+      });
+      if (res.status === 401 || res.status === 403) {
+        setShowLogin(true);
+        sessionStorage.removeItem('voicedish_session');
+        return;
+      }
       const data = await res.json();
       setOrders(data);
       setLoading(false);
@@ -50,9 +102,12 @@ export default function Dashboard() {
 
   const updateStatus = async (id: number, status: string) => {
     try {
-      await fetch(`http://localhost:8080/api/orders/${id}`, {
+      await fetch(`${API_BASE}/api/orders/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${sessionToken}`
+        },
         body: JSON.stringify({ status }),
       });
       fetchOrders();
@@ -71,6 +126,39 @@ export default function Dashboard() {
     }
   };
 
+  if (showLogin) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-zinc-50">
+        <div className="w-full max-w-md p-8 bg-white rounded-lg shadow-md border border-zinc-200">
+          <h2 className="text-2xl font-bold text-zinc-900 mb-4">VoiceDish Dashboard</h2>
+          <p className="text-zinc-600 mb-4">Enter your API key to access the dashboard.</p>
+          {error && <p className="text-red-600 mb-4 text-sm">{error}</p>}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const formData = new FormData(e.currentTarget);
+              login(formData.get('apiKey') as string);
+            }}
+          >
+            <input
+              name="apiKey"
+              type="password"
+              placeholder="Enter API Key"
+              className="w-full px-4 py-2 border border-zinc-300 rounded-md mb-4"
+              required
+            />
+            <button
+              type="submit"
+              className="w-full bg-zinc-900 text-white py-2 px-4 rounded-md hover:bg-zinc-800"
+            >
+              Access Dashboard
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -82,8 +170,14 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-zinc-50">
       <header className="bg-white border-b border-zinc-200">
-        <div className="mx-auto max-w-6xl px-6 py-4">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <h1 className="text-2xl font-bold text-zinc-900">VoiceDish Dashboard</h1>
+          <button
+            onClick={logout}
+            className="text-sm text-zinc-600 hover:text-zinc-900"
+          >
+            Logout
+          </button>
         </div>
       </header>
 
