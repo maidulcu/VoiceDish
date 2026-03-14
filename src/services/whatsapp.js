@@ -108,8 +108,26 @@ async function downloadMedia(mediaId) {
     }
 }
 
+const STATUS_MESSAGES = {
+    confirmed: "Your order has been confirmed! We're preparing it now.",
+    preparing: "Great news! Your food is being prepared.",
+    delivered: "Your order has been delivered! Enjoy your meal! 🍽️"
+};
+
+async function sendOrderStatusUpdate(to, status, orderId) {
+    const message = STATUS_MESSAGES[status];
+    if (!message) {
+        console.error(`Unknown status: ${status}`);
+        return;
+    }
+
+    const text = `Order #${orderId} Update: ${message}`;
+    return sendTextMessage(to, text);
+}
+
 module.exports = {
     sendTextMessage,
     sendLocationRequest,
+    sendOrderStatusUpdate,
     downloadMedia,
 };
