@@ -4,10 +4,21 @@ const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY,
 });
 
+const DEFAULT_MENU = `
+- Foods: Chicken Biryani (20 AED), Beef Biryani (22 AED), Paratha (2 AED), Samosa (1 AED), Butter Chicken (25 AED).
+- Drinks: Karak Chai (2 AED), Water (1 AED), Fresh Juice (10 AED), Soft Drinks (3 AED).
+`;
+
+function getMenuContext() {
+    return process.env.MENU_ITEMS || DEFAULT_MENU;
+}
+
 /**
  * Extract structured order data from a transcript using Llama 3
  */
 async function extractOrder(text) {
+    const menuContext = getMenuContext();
+    
     try {
         const chatCompletion = await groq.chat.completions.create({
             messages: [
@@ -17,8 +28,7 @@ async function extractOrder(text) {
           Your task is to extract food and drink items from the user's transcript.
 
           Menu Context (Use this to match items):
-          - Foods: Chicken Biryani (20 AED), Beef Biryani (22 AED), Paratha (2 AED), Samosa (1 AED), Butter Chicken (25 AED).
-          - Drinks: Karak Chai (2 AED), Water (1 AED), Fresh Juice (10 AED), Soft Drinks (3 AED).
+          ${menuContext}
           
           Guidelines:
           1. Return ONLY a valid JSON object.

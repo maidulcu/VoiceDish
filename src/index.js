@@ -3,6 +3,20 @@ const express = require('express');
 const { db, getOrders, getOrderById, updateOrderStatus } = require('./services/database');
 const { sendOrderStatusUpdate } = require('./services/whatsapp');
 
+const REQUIRED_ENV_VARS = ['WHATSAPP_TOKEN', 'WHATSAPP_PHONE_ID', 'VERIFY_TOKEN', 'GROQ_API_KEY'];
+
+function validateEnv() {
+    const missing = REQUIRED_ENV_VARS.filter(env => !process.env[env]);
+    if (missing.length > 0) {
+        console.error(`Missing required environment variables: ${missing.join(', ')}`);
+        console.error('Please copy .env.example to .env and fill in the values.');
+        process.exit(1);
+    }
+    console.log('Environment validation passed.');
+}
+
+validateEnv();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
