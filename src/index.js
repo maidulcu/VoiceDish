@@ -1,11 +1,34 @@
 require('dotenv').config();
 const express = require('express');
-const { db } = require('./services/database');
+const { db, getOrders, updateOrderStatus } = require('./services/database');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+
+// API Routes for Dashboard
+app.get('/api/orders', async (req, res) => {
+    try {
+        const orders = await getOrders(50);
+        res.json(orders);
+    } catch (error) {
+        console.error('Error fetching orders:', error);
+        res.status(500).json({ error: 'Failed to fetch orders' });
+    }
+});
+
+app.patch('/api/orders/:id/status', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body;
+        await updateOrderStatus(id, status);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating order status:', error);
+        res.status(500).json({ error: 'Failed to update order status' });
+    }
+});
 
 // Main webhook verification endpoint
 app.get('/webhook', (req, res) => {

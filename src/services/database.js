@@ -55,6 +55,19 @@ function updateOrderLocation(orderId, lat, long, mapsLink) {
     });
 }
 
+function updateOrderStatus(orderId, status) {
+    return new Promise((resolve, reject) => {
+        const sql = `UPDATE orders SET status = ? WHERE id = ?`;
+        db.run(sql, [status, orderId], function (err) {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(this.changes);
+            }
+        });
+    });
+}
+
 function getLatestPendingOrder(userPhone) {
     return new Promise((resolve, reject) => {
         const sql = `SELECT * FROM orders WHERE user_phone = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`;
@@ -85,5 +98,6 @@ module.exports = {
     createOrder,
     getOrders,
     updateOrderLocation,
+    updateOrderStatus,
     getLatestPendingOrder
 };
