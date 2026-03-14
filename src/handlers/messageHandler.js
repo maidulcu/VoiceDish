@@ -1,7 +1,9 @@
 const { sendTextMessage, sendLocationRequest } = require('../services/whatsapp');
 const { transcribeAudio } = require('../services/transcription');
 const { extractOrder } = require('../services/orderExtractor');
-const { createOrder, getLatestPendingOrder, updateOrderLocation } = require('../services/database');
+const { createOrder, getLatestPendingOrder, updateOrderLocation, getOrdersByPhone } = require('../services/database');
+
+const HISTORY_COMMANDS = ['history', 'my orders', 'order history', '/history'];
 
 async function handleMessage(message) {
     const from = message.from; // User's phone number
@@ -50,7 +52,13 @@ async function handleAudioMessage(message, from) {
 }
 
 async function handleTextMessage(message, from) {
-    const text = message.text.body;
+    const text = message.text.body.toLowerCase().trim();
+
+    // Check for history command
+    if (HISTORY_COMMANDS.includes(text)) {
+        return await handleHistoryRequest(from);
+    }
+
     const order = await extractOrder(text);
     await handleOrderProcessing(order, from);
 }
@@ -105,6 +113,31 @@ async function handleOrderProcessing(order, from) {
 
     // Send Location Request Button
     await sendLocationRequest(from, "Please share your location to complete the order");
+}
+
+async function handleHistoryRequest(from) {
+    try {
+        const orders = await getOrdersByPhone(from, 5);
+
+        if (orders.length === 0) {
+            return await sendTextMessage(from, "You haven't placed any orders yet. Send me a voice note to start! 🎤");
+        }
+
+        let response = "📋 *Your Order History:*\n\n";
+        orders.forEach(order => {
+            const items = JSON.parse(order.items);
+            const itemsList = items.map(i => `${i.quantity}x ${i.name}`).join(', ');
+            const status = order.status === 'delivered' ? '✅' : '⏳';
+            response += `${status} *Order #${order.id}* - ${order.total_price}\n`;
+            response += `   ${itemsList}\n`;
+            response += `   ${new Date(order.created_at).toLocaleDateString()}\n\n`;
+        });
+
+        await sendTextMessage(from, response);
+    } catch (error) {
+        console.error('Error fetching order history:', error);
+        await sendTextMessage(from, "Sorry, something went wrong while fetching your order history.");
+    }
 }
 
 module.exports = { handleMessage };

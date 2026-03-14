@@ -106,11 +106,25 @@ function getOrderById(orderId) {
         });
     });
 }
+
+function getOrdersByPhone(userPhone, limit = 10) {
+    return new Promise((resolve, reject) => {
+        const sql = `SELECT * FROM orders WHERE user_phone = ? ORDER BY created_at DESC LIMIT ?`;
+        db.all(sql, [userPhone, limit], (err, rows) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(rows);
+            }
+        });
+    });
+}
 module.exports = {
     db,
     createOrder,
     getOrders,
     getOrderById,
+    getOrdersByPhone,
     updateOrderLocation,
     updateOrderStatus,
     getLatestPendingOrder

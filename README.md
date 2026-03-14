@@ -11,6 +11,9 @@ VoiceDish is a high-speed, voice-first ordering bridge that integrates with exis
 - **Auto-Location Mapping:** Automatically prompts for a WhatsApp Location Pin and links it to the active order.
 - **Zero-Latency Processing:** Leverages Groq LPUs for sub-second order extraction using **Llama 3.3 70B**.
 - **Persistence:** Local SQLite storage for order tracking and fulfillment.
+- **Order Status Updates:** Customers receive WhatsApp notifications when order status changes (confirmed → preparing → delivered).
+- **Order History:** Customers can request their order history by sending "history" or "my orders".
+- **Admin Dashboard:** Built with Next.js to manage orders, update status, and view delivery locations on a map.
 
 ---
 
@@ -22,6 +25,22 @@ VoiceDish is a high-speed, voice-first ordering bridge that integrates with exis
 - **Database:** SQLite3 (Local persistence)
 - **Messaging:** WhatsApp Business Cloud API (v21.0)
 - **AI Infrastructure:** [Groq SDK](https://groq.com/)
+- **Frontend:** Next.js 14 (Admin Dashboard)
+
+### API Endpoints
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/orders` | List all orders (limit 50) |
+| GET | `/api/orders/:id` | Get single order |
+| PATCH | `/api/orders/:id/status` | Update order status |
+| GET | `/health` | Health check |
+
+### Admin Dashboard
+Start the frontend dashboard:
+```bash
+cd frontend && npm run dev
+```
+Dashboard runs on port 3001 by default.
 
 ### AI Pipeline
 1. **ASR (Speech-to-Text):** `whisper-large-v3` handles multi-dialect audio files (.ogg) downloaded from Meta's CDN.
@@ -33,9 +52,10 @@ The system maintains an `orders` table with:
 - `user_phone`: Customer's WhatsApp number
 - `items`: JSON array of extracted food items
 - `total_price`: Estimated cost
+- `status`: Order status (`pending` → `confirmed` → `preparing` → `delivered`)
 - `location_lat/long`: Precise GPS coordinates
 - `google_maps_link`: Shareable link for delivery drivers
-- `status`: `pending` or `confirmed`
+- `created_at`: Order timestamp
 
 ---
 
@@ -48,6 +68,12 @@ The system maintains an `orders` table with:
 5. **Session Management:** A "Pending" order is created in SQLite.
 6. **Confirmation & Location Request:** The bot sends a summary back to the user via WhatsApp with an **Interactive Location Request** button.
 7. **Fulfillment:** Once the user shares their location, the system updates the latest pending order with the GPS coordinates and notifies the merchant.
+8. **Status Updates:** Admin can update order status via Dashboard; customer receives WhatsApp notifications.
+
+### 📱 User Commands
+- **Voice Note / Text:** Place a new order
+- **"history" / "my orders"**: View your order history
+- **Location Share**: Complete order with delivery address
 
 ### 🔌 POS Integration (Planned)
 VoiceDish is designed to work as a plug-and-play add-on for existing POS systems like **PausePOS**.
